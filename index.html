@@ -102,6 +102,10 @@ table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;font
 th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 th{color:var(--muted);font-weight:500}
 .empty{color:var(--muted);padding:12px 0}
+.ask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:20px;z-index:50}
+.ask-box{background:var(--panel);color:var(--ink);border-radius:14px;padding:20px;max-width:360px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,.3)}
+.ask-box p{margin:0 0 16px;font-size:17px}
+.ask-btns{display:flex;gap:10px;justify-content:flex-end}
 @media (prefers-reduced-motion:reduce){.runner.hit{animation:none}.flash{transition:none}}
 </style>
 </head>
@@ -208,6 +212,12 @@ th{color:var(--muted);font-weight:500}
     <h2>Lap times</h2>
     <div class="tablewrap" id="results"><p class="empty">Lap times appear here once laps are counted.</p></div>
   </section>
+</div>
+
+<div class="ask" id="ask" role="dialog" aria-modal="true" aria-labelledby="askText" hidden>
+  <div class="ask-box"><p id="askText"></p>
+    <div class="ask-btns"><button class="btn" id="askNo">Cancel</button><button class="btn primary" id="askYes">OK</button></div>
+  </div>
 </div>
 
 <script>
@@ -1482,6 +1492,8 @@ AR.Detector.prototype.rotate2 = function (src, rotation) {
     const constraints = { audio: false, video: deviceId ? Object.assign({ deviceId: { exact: deviceId } }, size) : Object.assign({ facingMode: 'user' }, size) };
     try {
       stream = await navigator.mediaDevices.getUserMedia(constraints);
+      lastCamDevice = deviceId;
+      stream.getVideoTracks().forEach(t => { t.addEventListener('unmute', keepCameraAlive); t.addEventListener('ended', keepCameraAlive); });
       video.srcObject = stream;
       await video.play().catch(() => {});
       $('camMsg').hidden = true;
@@ -1496,6 +1508,30 @@ AR.Detector.prototype.rotate2 = function (src, rotation) {
     }
   }
   function stopCamera() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
+
+  // In-page confirm. Safari's built-in pop-up dialogs can pause the live camera on iPad.
+  function ask(text, yesLabel) {
+    return new Promise(resolve => {
+      const box = $('ask'), yes = $('askYes'), no = $('askNo');
+      $('askText').textContent = text; yes.textContent = yesLabel || 'OK'; box.hidden = false; no.focus();
+      const done = v => { box.hidden = true; yes.onclick = no.onclick = null; resolve(v); keepCameraAlive(); };
+      yes.onclick = () => done(true); no.onclick = () => done(false);
+    });
+  }
+
+  // Restart the camera picture if the iPad pauses or drops it (pop-ups, switching apps, screen lock).
+  let lastCamDevice, restarting = false;
+  function keepCameraAlive() {
+    if (!stream || restarting) return;
+    const track = stream.getVideoTracks()[0];
+    if (!track || track.readyState === 'ended') {
+      restarting = true; startCamera(lastCamDevice).finally(() => { restarting = false; }); return;
+    }
+    if (video.paused) video.play().catch(() => {});
+  }
+  setInterval(keepCameraAlive, 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) keepCameraAlive(); });
+  window.addEventListener('pageshow', keepCameraAlive);
   function showCamMsg(text, retry) {
     $('camMsgText').textContent = text; $('camBtn').textContent = retry ? 'Try again' : 'Turn on camera'; $('camMsg').hidden = false;
   }
@@ -1794,8 +1830,8 @@ AR.Detector.prototype.rotate2 = function (src, rotation) {
       try { wakeLock && wakeLock.release(); } catch (e) {}
     }
   });
-  $('resetBtn').addEventListener('click', () => {
-    if (runners.some(r => r.laps.length) && !confirm('Clear the timer and all lap counts?')) return;
+  $('resetBtn').addEventListener('click', async () => {
+    if (runners.some(r => r.laps.length) && !(await ask('Clear the timer and all lap counts?', 'Reset'))) return;
     running = false; elapsedBefore = 0; $('startBtn').textContent = 'Start'; $('clock').classList.remove('running');
     runners.forEach(r => { r.laps = []; r.finished = null; r.inZone = false; r.armed = true; r.seen = []; });
     motionArmed = true; renderRunners(); renderResults(); setStatus('Reset. Press Start when runners are ready.');
@@ -1825,9 +1861,9 @@ AR.Detector.prototype.rotate2 = function (src, rotation) {
     document.querySelectorAll('[data-for]').forEach(f => { f.hidden = !f.dataset.for.split(' ').includes(mode); });
     $('hint').textContent = HINTS[mode];
   }
-  function setMode(m) {
+  async function setMode(m) {
     if (m === mode) return;
-    if (runners.some(r => r.laps.length) && !confirm('Switching modes clears current laps. Continue?')) return;
+    if (runners.some(r => r.laps.length) && !(await ask('Switching modes clears current laps. Continue?', 'Switch'))) return;
     mode = m; armingId = null; $('cam').classList.remove('sampling'); prevGray = null; lastMarkers = [];
     applyModeUI(); resetRunners(); renderRunners(); renderResults();
   }
